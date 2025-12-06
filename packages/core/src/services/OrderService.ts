@@ -1,5 +1,8 @@
 import { extendedApi } from '../api/ExtendedApiClient';
 import { useOrderStore, useMarketStore } from '../store';
+import { createSignedOrder, getPublicKey, grindKey } from '../signing/orderSigning';
+import { DEFAULT_CONFIG } from '../config';
+import type { ExtendedConfig } from '../config';
 import type {
     CreateOrderRequest,
     OrderSide,
@@ -8,6 +11,7 @@ import type {
     TriggerPriceType,
     TriggerDirection,
     ExecutionPriceType,
+    Market,
 } from '../types';
 
 interface OrderParams {
@@ -56,11 +60,42 @@ export class OrderService {
     private starkPrivateKey: string | null = null;
     private starkPublicKey: string | null = null;
     private collateralPosition: string | null = null;
+    private config: ExtendedConfig = DEFAULT_CONFIG;
+    private marketCache: Map<string, Market> = new Map();
 
     setCredentials(privateKey: string, publicKey: string, position: string) {
         this.starkPrivateKey = privateKey;
         this.starkPublicKey = publicKey;
         this.collateralPosition = position;
+    }
+
+    /**
+     * Derive Stark keys from signature
+     */
+    deriveKeysFromSignature(signature: string): { privateKey: string; publicKey: string } {
+        const r = signature.slice(2, 66);
+        const privateKey = '0x' + grindKey(r);
+        const publicKey = getPublicKey(privateKey);
+        return { privateKey, publicKey };
+    }
+
+    setConfig(config: ExtendedConfig) {
+        this.config = config;
+    }
+
+    /**
+     * Get market info (cached)
+     */
+    async getMarketInfo(marketName: string): Promise<Market> {
+        if (this.marketCache.has(marketName)) {
+            return this.marketCache.get(marketName)!;
+        }
+        const markets = await extendedApi.getMarkets([marketName]);
+        if (markets.length > 0) {
+            this.marketCache.set(marketName, markets[0]);
+            return markets[0];
+        }
+        throw new Error(`Market ${marketName} not found`);
     }
 
     /**
@@ -95,47 +130,65 @@ export class OrderService {
     /**
      * Generate nonce for order signing
      */
-    generateNonce(): string {
+    generateNonce(): number {
         // Nonce must be >= 1 and <= 2^31
-        return Math.floor(Math.random() * 2147483647 + 1).toString();
+        return Math.floor(Math.random() * 2147483647 + 1);
     }
 
     /**
-     * Calculate expiration timestamp
+     * Calculate expiration timestamp in seconds
      * Default: 90 days for mainnet, 28 days for testnet
      */
-    calculateExpiration(days: number = 90): number {
-        return Date.now() + days * 24 * 60 * 60 * 1000;
+    calculateExpirationSeconds(days: number = 90): number {
+        // Add 14 day buffer as per Extended SDK
+        return Math.ceil((Date.now() + (days + 14) * 24 * 60 * 60 * 1000) / 1000);
     }
 
     /**
      * Sign order using Stark private key
-     * This is a placeholder - actual implementation requires starknet.js
      */
-    async signOrder(orderData: Partial<CreateOrderRequest>): Promise<SignedOrder> {
+    async signOrder(
+        market: Market,
+        side: OrderSide,
+        size: string,
+        price: string,
+        feeRate: string,
+        builderFee?: string
+    ): Promise<SignedOrder> {
         if (!this.starkPrivateKey || !this.starkPublicKey || !this.collateralPosition) {
-            throw new Error('Stark credentials not set');
+            throw new Error('Stark credentials not set. Please complete onboarding first.');
         }
 
         const nonce = this.generateNonce();
+        const expirationSeconds = this.calculateExpirationSeconds();
 
-        // TODO: Implement actual SNIP12 signing with starknet.js
-        // For now, return a placeholder
-        // The actual signing would use:
-        // 1. Create typed data structure following SNIP12
-        // 2. Sign with starknet.js Account.signMessage()
-        // 3. Return signature components
-
-        console.warn('[OrderService] Using placeholder signing - implement actual SNIP12 signing');
+        // Use the signing module
+        const { signature } = createSignedOrder(
+            this.starkPrivateKey,
+            this.starkPublicKey,
+            {
+                market: market.name,
+                side,
+                syntheticAmount: size,
+                price,
+                feeRate,
+                builderFee,
+                nonce,
+                expirationSeconds,
+                positionId: parseInt(this.collateralPosition),
+                syntheticAssetId: '0x1', // Base asset ID
+                collateralAssetId: this.config.collateralAssetId,
+                syntheticDecimals: market.assetPrecision,
+                collateralDecimals: this.config.collateralDecimals,
+            },
+            this.config
+        );
 
         return {
-            signature: {
-                r: '0x0', // Placeholder
-                s: '0x0', // Placeholder
-            },
+            signature,
             starkKey: this.starkPublicKey,
             collateralPosition: this.collateralPosition,
-            nonce,
+            nonce: nonce.toString(),
         };
     }
 
@@ -145,6 +198,9 @@ export class OrderService {
      */
     async createOrder(params: OrderParams): Promise<{ orderId: number; externalId: string }> {
         const externalId = this.generateExternalId();
+
+        // Get market info
+        const market = await this.getMarketInfo(params.market);
 
         // Get fee rate for the market
         const fees = await extendedApi.getFees(params.market);
@@ -158,8 +214,17 @@ export class OrderService {
             price = this.calculateMarketOrderPrice(params.side);
         }
 
+        // Sign the order first (this generates nonce internally)
+        const signedData = await this.signOrder(
+            market,
+            params.side,
+            params.size,
+            price,
+            feeRate
+        );
+
         // Build order request
-        const orderRequest: Partial<CreateOrderRequest> = {
+        const orderRequest: CreateOrderRequest = {
             id: externalId,
             market: params.market,
             type: params.type === 'MARKET' ? 'LIMIT' : params.type,
@@ -167,11 +232,17 @@ export class OrderService {
             qty: params.size,
             price,
             timeInForce: params.type === 'MARKET' ? 'IOC' : (params.timeInForce || 'GTT'),
-            expiryEpochMillis: this.calculateExpiration(params.expirationDays),
+            expiryEpochMillis: this.calculateExpirationSeconds(params.expirationDays) * 1000,
             fee: feeRate,
             reduceOnly: params.reduceOnly,
             postOnly: params.postOnly,
             selfTradeProtectionLevel: 'ACCOUNT',
+            nonce: signedData.nonce,
+            settlement: {
+                signature: signedData.signature,
+                starkKey: signedData.starkKey,
+                collateralPosition: signedData.collateralPosition,
+            },
         };
 
         // Add conditional trigger if present
@@ -205,19 +276,6 @@ export class OrderService {
             };
         }
 
-        // Sign the order
-        const signedData = await this.signOrder(orderRequest);
-
-        const fullRequest: CreateOrderRequest = {
-            ...orderRequest as CreateOrderRequest,
-            nonce: signedData.nonce,
-            settlement: {
-                signature: signedData.signature,
-                starkKey: signedData.starkKey,
-                collateralPosition: signedData.collateralPosition,
-            },
-        };
-
         // Set optimistic pending state
         useOrderStore.getState().setPending(externalId, true);
 
@@ -226,7 +284,7 @@ export class OrderService {
             const response = await fetch('/api/order', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(fullRequest),
+                body: JSON.stringify(orderRequest),
             });
 
             if (!response.ok) {

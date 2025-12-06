@@ -19,3 +19,6 @@ export * from './store';
 
 // Config
 export * from './config';
+
+// Signing utilities
+export * from './signing/orderSigning';
