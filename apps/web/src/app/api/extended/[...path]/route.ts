@@ -38,12 +38,24 @@ export async function GET(
             },
         });
 
+        // Handle non-JSON responses
+        const contentType = response.headers.get('content-type');
+        if (!contentType?.includes('application/json')) {
+            const text = await response.text();
+            console.error('[Proxy] Non-JSON response:', text.substring(0, 200));
+            return NextResponse.json(
+                { status: 'ERROR', error: { code: response.status, message: text.substring(0, 100) || 'Non-JSON response' } },
+                { status: response.status }
+            );
+        }
+
         const data = await response.json();
         return NextResponse.json(data, { status: response.status });
     } catch (error) {
-        console.error('[Proxy] GET error:', error);
+        const message = error instanceof Error ? error.message : 'Proxy request failed';
+        console.error('[Proxy] GET error:', message, error);
         return NextResponse.json(
-            { status: 'ERROR', error: { code: 500, message: 'Proxy request failed' } },
+            { status: 'ERROR', error: { code: 500, message } },
             { status: 500 }
         );
     }

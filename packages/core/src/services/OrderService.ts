@@ -202,11 +202,18 @@ export class OrderService {
         // Get market info
         const market = await this.getMarketInfo(params.market);
 
-        // Get fee rate for the market
-        const fees = await extendedApi.getFees(params.market);
-        const feeRate = params.postOnly
-            ? fees[0]?.makerFeeRate || '0'
-            : fees[0]?.takerFeeRate || '0.00025';
+        // Get fee rate for the market (with fallback since /user/fees requires auth)
+        let feeRate = '0.0005'; // Default taker fee: 0.05%
+        try {
+            const fees = await extendedApi.getFees(params.market);
+            if (fees.length > 0) {
+                feeRate = params.postOnly
+                    ? fees[0]?.makerFeeRate || '0'
+                    : fees[0]?.takerFeeRate || '0.0005';
+            }
+        } catch (error) {
+            console.warn('[OrderService] Could not fetch fees, using default:', feeRate);
+        }
 
         // Calculate price for market orders
         let price = params.price;

@@ -30,6 +30,21 @@ interface OrderHashParams {
     };
 }
 
+// Stark curve prime (CURVE.P)
+const CURVE_P = BigInt('0x800000000000011000000000000000000000000000000000000000000000001');
+
+/**
+ * Convert a possibly negative bigint to a valid Stark field element
+ * Negative values are converted to their modular equivalent
+ */
+function toFieldElement(value: bigint): bigint {
+    if (value >= 0n) {
+        return value;
+    }
+    // For negative values, add CURVE_P to get the equivalent positive field element
+    return CURVE_P + value;
+}
+
 /**
  * Calculate order message hash following Extended's pattern
  */
@@ -46,14 +61,14 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
         BigInt(params.domain.revision)
     );
 
-    // Order data hash
+    // Order data hash - convert all values to field elements (handle negatives)
     const orderDataHash = hash.computePedersenHashOnElements([
         BigInt(params.positionId),
         BigInt(params.baseAssetId),
-        params.baseAmount,
+        toFieldElement(params.baseAmount),
         BigInt(params.quoteAssetId),
-        params.quoteAmount,
-        params.feeAmount,
+        toFieldElement(params.quoteAmount),
+        toFieldElement(params.feeAmount),
         BigInt(params.feeAssetId),
         BigInt(params.expiration),
         BigInt(params.nonce),
