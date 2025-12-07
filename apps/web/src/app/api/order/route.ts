@@ -18,15 +18,19 @@ export async function POST(request: Request) {
     try {
         const orderPayload = await request.json();
 
-        // Extract API key from the request (optional for now during testing)
+        // Extract API key from the request
         const apiKey = request.headers.get('X-Api-Key');
 
-        // Inject builder code (server-side secret)
-        const finalPayload = {
-            ...orderPayload,
-            builderId: BUILDER_CLIENT_ID ? parseInt(BUILDER_CLIENT_ID, 10) : undefined,
-            builderFee: BUILDER_CLIENT_ID ? parseFloat(BUILDER_FEE_RATE) : undefined,
-        };
+        // For now, skip builder injection if no valid builder ID
+        // Builder integration requires registration with Extended
+        const finalPayload = { ...orderPayload };
+
+        // Only inject builder if explicitly configured and valid
+        if (BUILDER_CLIENT_ID && parseInt(BUILDER_CLIENT_ID, 10) > 0) {
+            // NOTE: Builder ID must be registered with Extended first
+            // finalPayload.builderId = parseInt(BUILDER_CLIENT_ID, 10);
+            // finalPayload.builderFee = parseFloat(BUILDER_FEE_RATE);
+        }
 
         console.log('[Order Proxy] Submitting order to Extended API');
         console.log('[Order Proxy] Payload:', JSON.stringify(finalPayload, null, 2));

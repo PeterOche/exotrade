@@ -2,21 +2,27 @@ import { extendedApi } from '../api/ExtendedApiClient';
 import { useAuthStore } from '../store';
 import type { ExtendedConfig } from '../config';
 import { DEFAULT_CONFIG } from '../config';
+import { grindKey, getPublicKey, signOrderHash, calculateOrderHash } from '../signing/orderSigning';
+import { hash, ec } from 'starknet';
 
-interface OnboardingResult {
+export interface OnboardingCredentials {
     accountId: number;
     apiKey: string;
     starkPublicKey: string;
     starkPrivateKey: string;
     vault: number;
+    walletAddress: string;
 }
+
+const STORAGE_KEY = 'exotrade_credentials';
 
 /**
  * Onboarding Service
- * Handles user account creation and setup on Extended
+ * Implements Extended's exact onboarding protocol
  */
 export class OnboardingService {
     private config: ExtendedConfig;
+    private credentials: OnboardingCredentials | null = null;
 
     constructor(config: ExtendedConfig = DEFAULT_CONFIG) {
         this.config = config;
@@ -24,9 +30,9 @@ export class OnboardingService {
 
     /**
      * Generate EIP-712 typed data for key derivation
-     * This follows Extended's SDK pattern
+     * This matches Extended SDK's get_key_derivation_struct_to_sign
      */
-    generateKeyDerivationMessage(accountIndex: number, walletAddress: string) {
+    generateKeyDerivationTypedData(accountIndex: number, walletAddress: string) {
         return {
             types: {
                 EIP712Domain: [
@@ -51,106 +57,252 @@ export class OnboardingService {
     }
 
     /**
-     * Derive Stark private key from Ethereum signature
-     * This follows Extended's SDK pattern using the 'r' value
+     * Generate EIP-712 typed data for account registration
+     * This matches Extended SDK's AccountRegistration
      */
-    deriveStarkKeyFromSignature(signature: string): string {
-        // Remove 0x prefix if present
-        const cleanSig = signature.replace(/^0x/, '');
-
-        // Extract 'r' value (first 64 characters)
-        const r = cleanSig.substring(0, 64);
-
-        // Convert to BigInt and grind to valid Stark key
-        // This is a simplified version - actual implementation needs grinding
-        const rBigInt = BigInt('0x' + r);
-
-        // For now, return the r value directly
-        // TODO: Implement proper key grinding using starknet.js
-        console.warn('[OnboardingService] Using simplified key derivation - implement proper grinding');
-
-        return '0x' + r;
+    generateRegistrationTypedData(
+        accountIndex: number,
+        walletAddress: string,
+        timestamp: string,
+        action: string = 'REGISTER'
+    ) {
+        return {
+            types: {
+                EIP712Domain: [
+                    { name: 'name', type: 'string' },
+                ],
+                AccountRegistration: [
+                    { name: 'accountIndex', type: 'int8' },
+                    { name: 'wallet', type: 'address' },
+                    { name: 'tosAccepted', type: 'bool' },
+                    { name: 'time', type: 'string' },
+                    { name: 'action', type: 'string' },
+                    { name: 'host', type: 'string' },
+                ],
+            },
+            domain: {
+                name: this.config.signingDomain,
+            },
+            primaryType: 'AccountRegistration' as const,
+            message: {
+                accountIndex,
+                wallet: walletAddress,
+                tosAccepted: true,
+                time: timestamp,
+                action,
+                host: this.config.onboardingUrl,
+            },
+        };
     }
 
     /**
-     * Check if user already has an Extended account
+     * Derive Stark keypair from EIP-712 signature
      */
-    async checkExistingAccount(): Promise<OnboardingResult | null> {
+    deriveStarkKeyFromSignature(signature: string): { privateKey: string; publicKey: string } {
+        const privateKey = grindKey(signature);
+        const publicKey = getPublicKey(privateKey);
+        return { privateKey, publicKey };
+    }
+
+    /**
+     * Generate L2 (Stark) signature for onboarding
+     * Signs: pedersen_hash(wallet_address, stark_public_key)
+     */
+    generateL2Signature(
+        walletAddress: string,
+        starkPrivateKey: string,
+        starkPublicKey: string
+    ): { r: string; s: string } {
+        // pedersen_hash(wallet_address, stark_public_key)
+        const walletBigInt = BigInt(walletAddress);
+        const publicKeyBigInt = BigInt(starkPublicKey);
+        const messageHash = hash.computePedersenHash(walletBigInt, publicKeyBigInt);
+
+        // Sign with Stark private key
+        const signature = signOrderHash(starkPrivateKey, BigInt(messageHash));
+        return signature;
+    }
+
+    /**
+     * Check if we have stored credentials
+     */
+    hasStoredCredentials(): boolean {
+        if (typeof window === 'undefined') return false;
+        return !!localStorage.getItem(STORAGE_KEY);
+    }
+
+    /**
+     * Load credentials from localStorage
+     */
+    loadStoredCredentials(): OnboardingCredentials | null {
+        if (typeof window === 'undefined') return null;
+
         try {
-            const accountInfo = await extendedApi.getAccountInfo();
-            if (accountInfo) {
-                // Account exists, but we need the full credentials from storage
-                // This would typically be stored securely after initial onboarding
-                return null; // Let the app check local storage
-            }
-            return null;
-        } catch {
+            const stored = localStorage.getItem(STORAGE_KEY);
+            if (!stored) return null;
+
+            const credentials = JSON.parse(stored) as OnboardingCredentials;
+            this.credentials = credentials;
+
+            // Set API key on client
+            extendedApi.setApiKey(credentials.apiKey);
+
+            // Update auth store
+            useAuthStore.getState().setAuth(
+                credentials.apiKey,
+                credentials.starkPrivateKey,
+                credentials.accountId
+            );
+            useAuthStore.getState().setOnboarded(true);
+
+            console.log('[OnboardingService] Loaded credentials for:', credentials.walletAddress);
+            return credentials;
+        } catch (error) {
+            console.error('[OnboardingService] Failed to load credentials:', error);
             return null;
         }
     }
 
     /**
-     * Onboard a new user to Extended
+     * Store credentials to localStorage
+     */
+    private storeCredentials(credentials: OnboardingCredentials): void {
+        if (typeof window === 'undefined') return;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(credentials));
+        this.credentials = credentials;
+    }
+
+    /**
+     * Clear stored credentials (logout)
+     */
+    clearCredentials(): void {
+        if (typeof window !== 'undefined') {
+            localStorage.removeItem(STORAGE_KEY);
+        }
+        this.credentials = null;
+        useAuthStore.getState().logout();
+    }
+
+    /**
+     * Get current credentials
+     */
+    getCredentials(): OnboardingCredentials | null {
+        return this.credentials;
+    }
+
+    /**
+     * Full onboarding flow
      * 
      * @param walletAddress - User's wallet address
-     * @param signMessage - Function to sign EIP-712 message (from Privy)
+     * @param signTypedData - Function to sign EIP-712 typed data
+     * @param signMessage - Function to sign plain messages (for API key creation)
      * @param referralCode - Optional referral code
      */
     async onboard(
         walletAddress: string,
-        signMessage: (typedData: object) => Promise<string>,
+        signTypedData: (typedData: object) => Promise<string>,
+        signMessage?: (message: string) => Promise<string>,
         referralCode?: string
-    ): Promise<OnboardingResult> {
-        const accountIndex = 0; // Main account
+    ): Promise<OnboardingCredentials> {
+        console.log('[OnboardingService] Starting onboarding for:', walletAddress);
 
-        // Generate key derivation message
-        const typedData = this.generateKeyDerivationMessage(accountIndex, walletAddress);
+        // Step 1: Sign key derivation message and derive Stark keys
+        const keyDerivationData = this.generateKeyDerivationTypedData(0, walletAddress);
+        console.log('[OnboardingService] Signing key derivation message...');
+        const keyDerivationSig = await signTypedData(keyDerivationData);
 
-        // Sign with user's wallet (via Privy)
-        const signature = await signMessage(typedData);
+        const { privateKey: starkPrivateKey, publicKey: starkPublicKey } =
+            this.deriveStarkKeyFromSignature(keyDerivationSig);
+        console.log('[OnboardingService] Derived Stark public key:', starkPublicKey);
 
-        // Derive Stark key from signature
-        const starkPrivateKey = this.deriveStarkKeyFromSignature(signature);
+        // Step 2: Sign registration message  
+        const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+        const registrationData = this.generateRegistrationTypedData(0, walletAddress, timestamp);
+        console.log('[OnboardingService] Signing registration message...');
+        const l1Signature = await signTypedData(registrationData);
 
-        // TODO: Derive public key from private key using starknet.js
-        // For now, use placeholder
-        const starkPublicKey = '0x' + 'placeholder';
+        // Step 3: Generate L2 signature
+        const l2Signature = this.generateL2Signature(walletAddress, starkPrivateKey, starkPublicKey);
+        console.log('[OnboardingService] L2 signature generated');
 
-        // Create onboarding payload
+        // Step 4: Build onboarding payload
         const onboardingPayload = {
-            accountIndex,
-            wallet: walletAddress,
-            starkKey: starkPublicKey,
+            l1Signature,
+            l2Key: starkPublicKey,
+            l2Signature: {
+                r: l2Signature.r,
+                s: l2Signature.s,
+            },
+            accountCreation: {
+                accountIndex: 0,
+                wallet: walletAddress,
+                tosAccepted: true,
+                time: timestamp,
+                action: 'REGISTER',
+                host: this.config.onboardingUrl,
+            },
             referralCode,
         };
 
-        // Submit onboarding request to Extended
-        const response = await fetch(`${this.config.onboardingUrl}/api/v1/onboard`, {
+        console.log('[OnboardingService] Onboarding payload:', JSON.stringify(onboardingPayload, null, 2));
+
+        // Step 5: Submit to Extended
+        const onboardUrl = typeof window !== 'undefined'
+            ? '/api/onboard'
+            : `${this.config.onboardingUrl}/auth/onboard`;
+
+        const response = await fetch(onboardUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'User-Agent': 'ExoTrade/1.0',
             },
             body: JSON.stringify(onboardingPayload),
         });
 
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.message || 'Onboarding failed');
+        const contentType = response.headers.get('content-type');
+        if (!contentType?.includes('application/json')) {
+            const text = await response.text();
+            console.error('[OnboardingService] Non-JSON response:', response.status, text.substring(0, 200));
+            throw new Error(`Onboarding failed (${response.status}): ${text.substring(0, 100)}`);
         }
 
         const result = await response.json();
+        console.log('[OnboardingService] Onboarding response:', result);
 
-        // Store credentials
-        const credentials: OnboardingResult = {
-            accountId: result.data.accountId,
-            apiKey: result.data.apiKey,
+        if (!response.ok || result.status === 'ERROR') {
+            throw new Error(result.error?.message || result.message || 'Onboarding failed');
+        }
+
+        // Step 6: Extract credentials
+        const credentials: OnboardingCredentials = {
+            accountId: result.data?.defaultAccount?.id || result.data?.accountId || 0,
+            apiKey: '', // Will be created in next step
             starkPublicKey,
             starkPrivateKey,
-            vault: result.data.vault,
+            vault: result.data?.defaultAccount?.l2Vault || result.data?.vault || 1,
+            walletAddress,
         };
 
-        // Update auth store
+        console.log('[OnboardingService] Account created, vault:', credentials.vault);
+
+        // Step 7: Create API key (if account was created successfully and signMessage provided)
+        if (credentials.accountId && signMessage) {
+            try {
+                credentials.apiKey = await this.createApiKey(
+                    walletAddress,
+                    credentials.accountId,
+                    signMessage
+                );
+                console.log('[OnboardingService] API key created');
+            } catch (apiKeyError) {
+                console.warn('[OnboardingService] Failed to create API key:', apiKeyError);
+                // Continue without API key - user can create manually
+            }
+        }
+
+        // Store and return credentials
+        this.storeCredentials(credentials);
+
         useAuthStore.getState().setAuth(
             credentials.apiKey,
             credentials.starkPrivateKey,
@@ -158,58 +310,79 @@ export class OnboardingService {
         );
         useAuthStore.getState().setOnboarded(true);
 
-        // Set API key on client
-        extendedApi.setApiKey(credentials.apiKey);
+        // Store deposit address (Starknet bridge address for receiving funds)
+        const depositAddress = result.data?.defaultAccount?.bridgeStarknetAddress;
+        if (depositAddress) {
+            useAuthStore.getState().setDepositAddress(depositAddress);
+            localStorage.setItem('exotrade_deposit_address', depositAddress);
+        }
 
+        if (credentials.apiKey) {
+            extendedApi.setApiKey(credentials.apiKey);
+        }
+
+        console.log('[OnboardingService] Onboarding complete');
         return credentials;
     }
 
     /**
-     * Create a subaccount
+     * Create API key for an account
      */
-    async createSubaccount(
-        accountIndex: number,
+    async createApiKey(
         walletAddress: string,
-        signMessage: (typedData: object) => Promise<string>,
-        description?: string
-    ): Promise<OnboardingResult> {
-        // Similar to onboard but for subaccounts
-        // Subaccounts share the same wallet but have different indices
-        const typedData = this.generateKeyDerivationMessage(accountIndex, walletAddress);
-        const signature = await signMessage(typedData);
-        const starkPrivateKey = this.deriveStarkKeyFromSignature(signature);
-        const starkPublicKey = '0x' + 'placeholder';
+        accountId: number,
+        signMessage: (message: string) => Promise<string>
+    ): Promise<string> {
+        const requestPath = '/api/v1/user/account/api-key';
+        const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+        const messageToSign = `${requestPath}@${timestamp}`;
 
-        const payload = {
-            accountIndex,
-            wallet: walletAddress,
-            starkKey: starkPublicKey,
-            description,
-        };
+        const l1Signature = await signMessage(messageToSign);
 
-        const response = await fetch(`${this.config.onboardingUrl}/api/v1/onboard/subaccount`, {
+        const apiKeyUrl = typeof window !== 'undefined'
+            ? '/api/extended/user/account/api-key'
+            : `${this.config.onboardingUrl}${requestPath}`;
+
+        const response = await fetch(apiKeyUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'User-Agent': 'ExoTrade/1.0',
+                'L1_SIGNATURE': l1Signature,
+                'L1_MESSAGE_TIME': timestamp,
+                'X-X10-ACTIVE-ACCOUNT': String(accountId),
             },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ description: 'ExoTrade Trading Key' }),
         });
 
+        const result = await response.json();
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.message || 'Subaccount creation failed');
+            throw new Error(result.error?.message || 'Failed to create API key');
         }
 
-        const result = await response.json();
+        return result.data?.key || '';
+    }
 
-        return {
-            accountId: result.data.accountId,
-            apiKey: result.data.apiKey,
-            starkPublicKey,
-            starkPrivateKey,
-            vault: result.data.vault,
-        };
+    /**
+     * Check if user is onboarded
+     */
+    async checkOnboardingStatus(walletAddress: string): Promise<OnboardingCredentials | null> {
+        const stored = this.loadStoredCredentials();
+
+        if (!stored) return null;
+
+        if (stored.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+            console.log('[OnboardingService] Wallet mismatch, clearing credentials');
+            this.clearCredentials();
+            return null;
+        }
+
+        // Load saved deposit address
+        const savedDepositAddress = localStorage.getItem('exotrade_deposit_address');
+        if (savedDepositAddress) {
+            useAuthStore.getState().setDepositAddress(savedDepositAddress);
+        }
+
+        return stored;
     }
 }
 

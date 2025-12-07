@@ -109,6 +109,163 @@ Required for order management endpoints. Orders are signed using:
 
 ---
 
+## Onboarding Flow
+
+> **CRITICAL:** Users must complete onboarding before placing orders. This registers their Stark key with Extended and creates an API key.
+
+### Overview
+
+1. **Sign EIP-712 Key Derivation Message** → Derive Stark keypair from signature
+2. **Sign EIP-712 Registration Message** → Get L1 signature for account registration
+3. **Generate L2 Signature** → Stark signature of (wallet_address, stark_public_key)
+4. **POST to `/auth/onboard`** → Register account with Extended
+5. **Create API Key** → Sign message and POST to `/api/v1/user/account/api-key`
+
+### Step 1: Key Derivation (EIP-712)
+
+```typescript
+const keyDerivationTypedData = {
+  types: {
+    EIP712Domain: [
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" }
+    ],
+    AccountCreation: [
+      { name: "action", type: "string" },
+      { name: "accountIndex", type: "uint32" }
+    ]
+  },
+  primaryType: "AccountCreation",
+  domain: {
+    name: "Extended Exchange",
+    version: "1.0",
+    chainId: 11155111  // Sepolia
+  },
+  message: {
+    action: "Create L2 Key",
+    accountIndex: 0
+  }
+};
+
+const signature = await signTypedData(keyDerivationTypedData);
+const { privateKey, publicKey } = deriveStarkKeysFromSignature(signature);
+```
+
+### Step 2: Account Registration (EIP-712)
+
+```typescript
+const registrationTypedData = {
+  types: {
+    EIP712Domain: [
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" }
+    ],
+    AccountRegistration: [
+      { name: "action", type: "string" },
+      { name: "accountIndex", type: "uint32" },
+      { name: "wallet", type: "address" },
+      { name: "tosAccepted", type: "bool" },
+      { name: "time", type: "string" },
+      { name: "host", type: "string" }
+    ]
+  },
+  primaryType: "AccountRegistration",
+  domain: {
+    name: "Extended Exchange",
+    version: "1.0",
+    chainId: 11155111
+  },
+  message: {
+    action: "REGISTER",
+    accountIndex: 0,
+    wallet: walletAddress,
+    tosAccepted: true,
+    time: new Date().toISOString(),
+    host: "https://api.starknet.sepolia.extended.exchange"
+  }
+};
+
+const l1Signature = await signTypedData(registrationTypedData);
+```
+
+### Step 3: Generate L2 Signature
+
+```typescript
+import { ec, hash } from 'starknet';
+
+// Pedersen hash of wallet address and stark public key
+const messageHash = hash.computePedersenHash(
+  walletAddress.toLowerCase(),
+  starkPublicKey
+);
+
+// Sign with Stark private key
+const l2Signature = ec.starkCurve.sign(messageHash, starkPrivateKey);
+```
+
+### Step 4: Register Account
+
+```http
+POST /auth/onboard
+Content-Type: application/json
+
+{
+  "l1Signature": "0x...",
+  "l2Key": "0x...",
+  "l2Signature": {
+    "r": "0x...",
+    "s": "0x..."
+  },
+  "accountCreation": {
+    "accountIndex": 0,
+    "wallet": "0x...",
+    "tosAccepted": true,
+    "time": "2024-12-07T10:00:00Z",
+    "action": "REGISTER",
+    "host": "https://api.starknet.sepolia.extended.exchange"
+  },
+  "referralCode": ""
+}
+```
+
+**Response:**
+```json
+{
+  "status": "OK",
+  "data": {
+    "l1Address": "0x...",
+    "defaultAccount": {
+      "id": 3817,
+      "clientId": 2683,
+      "l2Key": "0x...",
+      "l2Vault": "500818",
+      "positionId": 500818,
+      "status": "ACTIVE"
+    }
+  }
+}
+```
+
+### Step 5: Create API Key
+
+```http
+POST /api/v1/user/account/api-key
+Content-Type: application/json
+L1_SIGNATURE: <signature of "{path}@{timestamp}">
+L1_MESSAGE_TIME: 2024-12-07T10:00:00Z
+X-X10-ACTIVE-ACCOUNT: 3817
+
+{
+  "description": "ExoTrade Trading Key"
+}
+```
+
+**Message to sign:** `/api/v1/user/account/api-key@2024-12-07T10:00:00Z`
+
+---
+
 ## Builder Codes Integration
 
 > **Critical for ExoTrade Revenue**
@@ -414,7 +571,7 @@ interface CreateOrderRequest {
 ### Price Requirements
 
 **Limit Orders:**
-- Long: `price ≤ markPrice × (1 + limitPriceCap)`
+- Long: `price ≤ markPrice × (1 + limitPriceCap)` (5-15% depending on market group)
 - Short: `price ≥ markPrice × (1 - limitPriceFloor)`
 
 **Market Orders:**
@@ -423,17 +580,46 @@ interface CreateOrderRequest {
 
 ### Market Order Implementation
 
-> Extended doesn't natively support market orders. Implement as:
+> Extended doesn't natively support market orders. Implement as IOC limit orders:
 
 ```typescript
-// Market Buy
-const price = bestAskPrice * 1.0075;
-const order = { type: "LIMIT", timeInForce: "IOC", price };
+// Market Buy - use mark price with buffer (stay under 5% cap)
+const price = markPrice * 1.049;
+const order = { type: "LIMIT", timeInForce: "IOC", price: roundToTickSize(price) };
 
 // Market Sell  
-const price = bestBidPrice * 0.9925;
-const order = { type: "LIMIT", timeInForce: "IOC", price };
+const price = markPrice * 0.951;
+const order = { type: "LIMIT", timeInForce: "IOC", price: roundToTickSize(price) };
 ```
+
+> ⚠️ **IMPORTANT:** Do NOT use best bid/ask prices - they can exceed mark price cap during volatility!
+
+### Expiration Limits
+
+| Network | Max Expiry |
+|---------|------------|
+| Mainnet | 90 days |
+| Testnet | 28 days |
+
+### Trading Rules (BTC-USD Example)
+
+| Rule | Value |
+|------|-------|
+| Min Trade Size | 0.0001 BTC |
+| Min Price Change (Tick) | $1 (mainnet) / $0.1 (testnet) |
+| Max Market Order | $3,000,000 |
+| Max Limit Order | $15,000,000 |
+| Limit Price Cap | 5% |
+| Max Leverage | 50x |
+| Max Open Orders | 200 |
+
+### Self Trade Protection
+
+| Level | Description |
+|-------|-------------|
+| `DISABLED` | Self-trades allowed |
+| `ACCOUNT` | Block within sub-account |
+| `CLIENT` | Block across all sub-accounts |
 
 ---
 

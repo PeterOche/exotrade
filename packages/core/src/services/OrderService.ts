@@ -1,5 +1,5 @@
 import { extendedApi } from '../api/ExtendedApiClient';
-import { useOrderStore, useMarketStore } from '../store';
+import { useOrderStore, useMarketStore, useAuthStore } from '../store';
 import { createSignedOrder, getPublicKey, grindKey } from '../signing/orderSigning';
 import { DEFAULT_CONFIG } from '../config';
 import type { ExtendedConfig } from '../config';
@@ -99,25 +99,71 @@ export class OrderService {
     }
 
     /**
-     * Calculate market order price based on current BBO
-     * Market Buy: Best Ask × 1.0075
-     * Market Sell: Best Bid × 0.9925
+     * Round price to market's tick size
      */
-    calculateMarketOrderPrice(side: OrderSide): string {
-        const orderBook = useMarketStore.getState().orderBook;
-        if (!orderBook) {
-            throw new Error('Order book not available');
+    roundToTickSize(price: number, tickSize: string): string {
+        const tick = parseFloat(tickSize);
+        if (tick <= 0) return price.toFixed(2);
+
+        // Round to nearest tick
+        const rounded = Math.round(price / tick) * tick;
+
+        // Determine decimal places from tick size
+        const tickStr = tickSize.replace(/0+$/, ''); // Remove trailing zeros
+        const decimalPlaces = tickStr.includes('.')
+            ? tickStr.split('.')[1]?.length || 0
+            : 0;
+
+        return rounded.toFixed(decimalPlaces);
+    }
+
+    /**
+     * Calculate market order price based on mark price
+     * Market orders must be within 5% of mark price per Extended docs:
+     * - Long Market Order: Price ≤ Mark Price * (1 + 5%)
+     * - Short Market Order: Price ≥ Mark Price * (1 - 5%)
+     */
+    calculateMarketOrderPrice(side: OrderSide, market?: Market): string {
+        const marketStore = useMarketStore.getState();
+        const marketName = market?.name || marketStore.selectedMarket || 'BTC-USD';
+
+        // Use mark price with 4.9% buffer (stay within 5% cap)
+        const markPrice = marketStore.markPrices[marketName];
+        if (markPrice) {
+            const mark = parseFloat(markPrice);
+            const price = side === 'BUY' ? mark * 1.049 : mark * 0.951;
+
+            if (market?.tradingConfig?.minPriceChange) {
+                return this.roundToTickSize(price, market.tradingConfig.minPriceChange);
+            }
+            return price.toFixed(2);
         }
 
+        // Fallback to order book if mark price unavailable
+        const orderBook = marketStore.orderBook;
+        if (!orderBook) {
+            throw new Error('Order book and mark price not available');
+        }
+
+        let price: number;
         if (side === 'BUY') {
             const bestAsk = orderBook.asks[0]?.price;
             if (!bestAsk) throw new Error('No ask price available');
-            return (parseFloat(bestAsk) * 1.0075).toFixed(6);
+            // Use 0.75% slippage from best ask (conservative)
+            price = parseFloat(bestAsk) * 1.0075;
         } else {
             const bestBid = orderBook.bids[0]?.price;
             if (!bestBid) throw new Error('No bid price available');
-            return (parseFloat(bestBid) * 0.9925).toFixed(6);
+            price = parseFloat(bestBid) * 0.9925;
         }
+
+        // Round to tick size if market info available
+        if (market?.tradingConfig?.minPriceChange) {
+            return this.roundToTickSize(price, market.tradingConfig.minPriceChange);
+        }
+
+        // Default to 2 decimal places for USD pairs
+        return price.toFixed(2);
     }
 
     /**
@@ -137,11 +183,12 @@ export class OrderService {
 
     /**
      * Calculate expiration timestamp in seconds
-     * Default: 90 days for mainnet, 28 days for testnet
+     * Default: 28 days (safe for testnet), max 90 days
      */
-    calculateExpirationSeconds(days: number = 90): number {
-        // Add 14 day buffer as per Extended SDK
-        return Math.ceil((Date.now() + (days + 14) * 24 * 60 * 60 * 1000) / 1000);
+    calculateExpirationSeconds(days: number = 28): number {
+        // Ensure we don't exceed 90 days max
+        const safeDays = Math.min(days, 90);
+        return Math.ceil((Date.now() + safeDays * 24 * 60 * 60 * 1000) / 1000);
     }
 
     /**
@@ -218,7 +265,10 @@ export class OrderService {
         // Calculate price for market orders
         let price = params.price;
         if (params.type === 'MARKET' || !price) {
-            price = this.calculateMarketOrderPrice(params.side);
+            price = this.calculateMarketOrderPrice(params.side, market);
+        } else if (market.tradingConfig?.minPriceChange) {
+            // Round limit price to tick size
+            price = this.roundToTickSize(parseFloat(price), market.tradingConfig.minPriceChange);
         }
 
         // Sign the order first (this generates nonce internally)
@@ -287,16 +337,50 @@ export class OrderService {
         useOrderStore.getState().setPending(externalId, true);
 
         try {
+            // Get API key from auth store
+            const apiKey = useAuthStore.getState().apiKey;
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json',
+            };
+            if (apiKey) {
+                headers['X-Api-Key'] = apiKey;
+            }
+
             // Submit via serverless proxy (which adds builder code)
             const response = await fetch('/api/order', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers,
                 body: JSON.stringify(orderRequest),
             });
 
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.message || 'Order submission failed');
+                const errorData = await response.json();
+                // Extended API returns: { status: "ERROR", error: { code: number, message: string } }
+                const errorMessage = errorData.error?.message || errorData.message || 'Order submission failed';
+                const errorCode = errorData.error?.code;
+
+                // Provide user-friendly error messages for common errors
+                let userMessage = errorMessage;
+                switch (errorCode) {
+                    case 1140:
+                        userMessage = 'Insufficient balance. Please deposit funds to trade.';
+                        break;
+                    case 1141:
+                        userMessage = 'Invalid price value. Price exceeds allowed range.';
+                        break;
+                    case 1125:
+                        userMessage = 'Invalid price precision. Price must match market tick size.';
+                        break;
+                    case 1135:
+                        userMessage = 'Order expiration too far in future (max 28 days on testnet).';
+                        break;
+                    case 1150:
+                        userMessage = 'Invalid builder ID. Please check configuration.';
+                        break;
+                }
+
+                console.error('[OrderService] Order error:', errorCode, errorMessage);
+                throw new Error(userMessage);
             }
 
             const result = await response.json();

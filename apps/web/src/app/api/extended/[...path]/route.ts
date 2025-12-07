@@ -72,17 +72,44 @@ export async function POST(
     try {
         const body = await request.json();
 
+        // Build headers, forwarding auth headers
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'ExoTrade/1.0',
+        };
+
+        // Forward API key if present
+        if (request.headers.get('X-Api-Key')) {
+            headers['X-Api-Key'] = request.headers.get('X-Api-Key')!;
+        }
+
+        // Forward L1 signature headers (used for API key creation)
+        if (request.headers.get('L1_SIGNATURE')) {
+            headers['L1_SIGNATURE'] = request.headers.get('L1_SIGNATURE')!;
+        }
+        if (request.headers.get('L1_MESSAGE_TIME')) {
+            headers['L1_MESSAGE_TIME'] = request.headers.get('L1_MESSAGE_TIME')!;
+        }
+        if (request.headers.get('X-X10-ACTIVE-ACCOUNT')) {
+            headers['X-X10-ACTIVE-ACCOUNT'] = request.headers.get('X-X10-ACTIVE-ACCOUNT')!;
+        }
+
         const response = await fetch(targetUrl, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'ExoTrade/1.0',
-                ...(request.headers.get('X-Api-Key')
-                    ? { 'X-Api-Key': request.headers.get('X-Api-Key')! }
-                    : {}),
-            },
+            headers,
             body: JSON.stringify(body),
         });
+
+        // Handle non-JSON responses
+        const contentType = response.headers.get('content-type');
+        if (!contentType?.includes('application/json')) {
+            const text = await response.text();
+            console.error('[Proxy] POST non-JSON response:', response.status, text.substring(0, 200));
+            return NextResponse.json(
+                { status: 'ERROR', error: { code: response.status, message: text.substring(0, 100) || 'Request failed' } },
+                { status: response.status || 500 }
+            );
+        }
 
         const data = await response.json();
         return NextResponse.json(data, { status: response.status });

@@ -1,5 +1,6 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { useUIStore, type PanelType } from '@exotrade/core';
 
 const NAV_ITEMS: { id: PanelType; label: string; icon: string }[] = [
@@ -9,6 +10,7 @@ const NAV_ITEMS: { id: PanelType; label: string; icon: string }[] = [
 ];
 
 export function MobileNav() {
+    const router = useRouter();
     const activePanel = useUIStore((s) => s.activePanel);
     const setActivePanel = useUIStore((s) => s.setActivePanel);
 
@@ -20,14 +22,22 @@ export function MobileNav() {
                         key={item.id}
                         onClick={() => setActivePanel(item.id)}
                         className={`flex flex-col items-center justify-center flex-1 h-full transition-colors ${activePanel === item.id
-                                ? 'text-green-500'
-                                : 'text-zinc-500 hover:text-zinc-300'
+                            ? 'text-green-500'
+                            : 'text-zinc-500 hover:text-zinc-300'
                             }`}
                     >
                         <span className="text-xl mb-1">{item.icon}</span>
                         <span className="text-xs font-medium">{item.label}</span>
                     </button>
                 ))}
+                {/* Wallet button */}
+                <button
+                    onClick={() => router.push('/wallet')}
+                    className="flex flex-col items-center justify-center flex-1 h-full transition-colors text-zinc-500 hover:text-zinc-300"
+                >
+                    <span className="text-xl mb-1">💰</span>
+                    <span className="text-xs font-medium">Wallet</span>
+                </button>
             </div>
         </nav>
     );

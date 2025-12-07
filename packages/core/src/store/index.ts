@@ -10,8 +10,10 @@ interface AuthState {
     apiKey: string | null;
     starkKey: string | null;
     accountId: number | null;
+    depositAddress: string | null;  // Starknet bridge address for deposits
     setAuth: (apiKey: string, starkKey: string, accountId: number) => void;
     setOnboarded: (value: boolean) => void;
+    setDepositAddress: (address: string) => void;
     logout: () => void;
 }
 
@@ -21,6 +23,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
     apiKey: null,
     starkKey: null,
     accountId: null,
+    depositAddress: null,
     setAuth: (apiKey, starkKey, accountId) => set({
         isAuthenticated: true,
         apiKey,
@@ -28,12 +31,14 @@ export const useAuthStore = create<AuthState>()((set) => ({
         accountId
     }),
     setOnboarded: (value) => set({ isOnboarded: value }),
+    setDepositAddress: (address) => set({ depositAddress: address }),
     logout: () => set({
         isAuthenticated: false,
         isOnboarded: false,
         apiKey: null,
         starkKey: null,
-        accountId: null
+        accountId: null,
+        depositAddress: null
     }),
 }));
 
