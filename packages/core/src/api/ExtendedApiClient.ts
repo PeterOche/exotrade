@@ -22,6 +22,7 @@ import { DEFAULT_CONFIG } from '../config';
 export class ExtendedApiClient {
     private config: ExtendedConfig;
     private apiKey: string | null = null;
+    private accountId: number | null = null;
 
     constructor(config: ExtendedConfig = DEFAULT_CONFIG) {
         this.config = config;
@@ -29,6 +30,10 @@ export class ExtendedApiClient {
 
     setApiKey(apiKey: string) {
         this.apiKey = apiKey;
+    }
+
+    setAccountId(accountId: number) {
+        this.accountId = accountId;
     }
 
     /**
@@ -60,6 +65,11 @@ export class ExtendedApiClient {
 
         if (this.apiKey) {
             (headers as Record<string, string>)['X-Api-Key'] = this.apiKey;
+        }
+
+        // Add account ID for user endpoints
+        if (this.accountId && endpoint.startsWith('/user')) {
+            (headers as Record<string, string>)['X-X10-ACTIVE-ACCOUNT'] = String(this.accountId);
         }
 
         const response = await fetch(url, {

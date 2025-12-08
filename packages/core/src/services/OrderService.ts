@@ -127,11 +127,15 @@ export class OrderService {
         const marketStore = useMarketStore.getState();
         const marketName = market?.name || marketStore.selectedMarket || 'BTC-USD';
 
-        // Use mark price with 4.9% buffer (stay within 5% cap)
-        const markPrice = marketStore.markPrices[marketName];
-        if (markPrice) {
-            const mark = parseFloat(markPrice);
-            const price = side === 'BUY' ? mark * 1.049 : mark * 0.951;
+        // Prefer fresh mark price from market API response over stale WebSocket store
+        const freshMarkPrice = market?.marketStats?.markPrice;
+        const storedMarkPrice = marketStore.markPrices[marketName];
+        const markPriceStr = freshMarkPrice || storedMarkPrice;
+
+        if (markPriceStr) {
+            const mark = parseFloat(markPriceStr);
+            // Use 4.5% buffer (safely within 5% cap)
+            const price = side === 'BUY' ? mark * 1.045 : mark * 0.955;
 
             if (market?.tradingConfig?.minPriceChange) {
                 return this.roundToTickSize(price, market.tradingConfig.minPriceChange);

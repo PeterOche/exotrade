@@ -17,6 +17,18 @@ export default function WalletPage() {
     useEffect(() => {
         const fetchBalance = async () => {
             try {
+                // Ensure API key and account ID are loaded from localStorage
+                const storedCreds = localStorage.getItem('exotrade_credentials');
+                if (storedCreds) {
+                    const creds = JSON.parse(storedCreds);
+                    if (creds.apiKey) {
+                        extendedApi.setApiKey(creds.apiKey);
+                    }
+                    if (creds.accountId) {
+                        extendedApi.setAccountId(creds.accountId);
+                    }
+                }
+
                 const balanceData = await extendedApi.getBalance();
                 if (balanceData) {
                     useAccountStore.getState().setBalance(balanceData);

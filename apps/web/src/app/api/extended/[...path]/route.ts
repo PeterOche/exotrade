@@ -11,6 +11,52 @@ const EXTENDED_API_URL = process.env.NEXT_PUBLIC_EXTENDED_NETWORK === 'mainnet'
     ? 'https://api.starknet.extended.exchange/api/v1'
     : 'https://api.starknet.sepolia.extended.exchange/api/v1';
 
+/**
+ * Fetch with retry and exponential backoff
+ */
+async function fetchWithRetry(
+    url: string,
+    options: RequestInit,
+    maxRetries: number = 3,
+    baseDelay: number = 1000
+): Promise<Response> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
+
+            const response = await fetch(url, {
+                ...options,
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+            return response;
+        } catch (error) {
+            lastError = error as Error;
+            const isRetryable =
+                error instanceof Error &&
+                (error.name === 'AbortError' ||
+                    error.message.includes('timeout') ||
+                    error.message.includes('ETIMEDOUT') ||
+                    error.message.includes('fetch failed'));
+
+            if (!isRetryable || attempt === maxRetries - 1) {
+                throw error;
+            }
+
+            // Exponential backoff: 1s, 2s, 4s
+            const delay = baseDelay * Math.pow(2, attempt);
+            console.log(`[Proxy] Retry ${attempt + 1}/${maxRetries} after ${delay}ms`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+
+    throw lastError || new Error('Max retries exceeded');
+}
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ path: string[] }> }
@@ -25,17 +71,34 @@ export async function GET(
         targetUrl += `?${searchParams.toString()}`;
     }
 
+    // Check if this is a /user/ endpoint that requires auth
+    const isUserEndpoint = pathString.startsWith('user/');
+    const apiKeyFromRequest = request.headers.get('X-Api-Key');
+    const accountIdFromRequest = request.headers.get('X-X10-ACTIVE-ACCOUNT');
+
+    if (isUserEndpoint && !apiKeyFromRequest) {
+        console.warn('[Proxy] User endpoint called without API key:', pathString);
+    }
+
     try {
-        const response = await fetch(targetUrl, {
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'ExoTrade/1.0',
+        };
+
+        // Forward API key if present
+        if (apiKeyFromRequest) {
+            headers['X-Api-Key'] = apiKeyFromRequest;
+        }
+
+        // Forward account ID if present
+        if (accountIdFromRequest) {
+            headers['X-X10-ACTIVE-ACCOUNT'] = accountIdFromRequest;
+        }
+
+        const response = await fetchWithRetry(targetUrl, {
             method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'ExoTrade/1.0',
-                // Forward API key if present
-                ...(request.headers.get('X-Api-Key')
-                    ? { 'X-Api-Key': request.headers.get('X-Api-Key')! }
-                    : {}),
-            },
+            headers,
         });
 
         // Handle non-JSON responses
@@ -53,13 +116,14 @@ export async function GET(
         return NextResponse.json(data, { status: response.status });
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Proxy request failed';
-        console.error('[Proxy] GET error:', message, error);
+        console.error('[Proxy] GET error:', message);
         return NextResponse.json(
-            { status: 'ERROR', error: { code: 500, message } },
-            { status: 500 }
+            { status: 'ERROR', error: { code: 503, message: 'Extended API temporarily unavailable. Please try again.' } },
+            { status: 503 }
         );
     }
 }
+
 
 export async function POST(
     request: Request,
