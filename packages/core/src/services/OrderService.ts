@@ -342,7 +342,7 @@ export class OrderService {
             selfTradeProtectionLevel: 'ACCOUNT',
             nonce: signedData.nonce,
             settlement: {
-                signature: signedData.signature,
+                signature: { r: signedData.signature.r, s: signedData.signature.s },
                 starkKey: signedData.starkKey,
                 collateralPosition: signedData.collateralPosition,
             },

@@ -32,9 +32,6 @@ export async function POST(request: Request) {
             // finalPayload.builderFee = parseFloat(BUILDER_FEE_RATE);
         }
 
-        console.log('[Order Proxy] Submitting order to Extended API');
-        console.log('[Order Proxy] Payload:', JSON.stringify(finalPayload, null, 2));
-
         // Forward to Extended API
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
@@ -45,6 +42,10 @@ export async function POST(request: Request) {
         if (apiKey) {
             headers['X-Api-Key'] = apiKey;
         }
+
+        console.log('[Order Proxy] Submitting order to Extended API');
+        console.log('[Order Proxy] Headers:', JSON.stringify(headers, null, 2));
+        console.log('[Order Proxy] Payload:', JSON.stringify(finalPayload, null, 2));
 
         const response = await fetch(`${EXTENDED_API_URL}/user/order`, {
             method: 'POST',

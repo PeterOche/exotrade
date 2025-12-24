@@ -79,16 +79,15 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
         ]
     };
 
-    // Ensure all numeric values are positive field elements and passed as hex strings
-    // to avoid "0x-" BigInt conversion errors in the library
+    // Use raw numeric values (positive field elements) to match debugInfo
     const message = {
         positionId: { value: { value: num.toHex(params.positionId) } },
         baseAssetId: { value: num.toHex(params.baseAssetId) },
-        baseAmount: { _value: num.toHex(toFieldElement(params.baseAmount)) },
+        baseAmount: { _value: toFieldElement(params.baseAmount).toString() }, // use stringified bigint
         quoteAssetId: { value: num.toHex(params.quoteAssetId) },
-        quoteAmount: { _value: num.toHex(toFieldElement(params.quoteAmount)) },
+        quoteAmount: { _value: toFieldElement(params.quoteAmount).toString() }, // use stringified bigint
         feeAssetId: { value: num.toHex(params.feeAssetId) },
-        feeAmount: num.toHex(params.feeAmount), // feeAmount is usually positive but handle as felt for safety
+        feeAmount: toFieldElement(params.feeAmount).toString(),
         expiration: { seconds: num.toHex(params.expiration) },
         salt: num.toHex(params.nonce)
     };
@@ -96,7 +95,7 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
     const domain = {
         name: params.domain.name,
         version: params.domain.version,
-        chainId: params.domain.chainId,
+        chainId: params.domain.chainId, // 'SN_SEPOLIA'
         revision: params.domain.revision
     };
 
@@ -108,13 +107,13 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
     };
 
     // Calculate the hash using SNIP-12
-    // Extended uses the publicKey as the signer address for the hash context
+    const msgHash = typedData.getMessageHash(myTypedData, params.publicKey);
+
     console.error('[orderSigning] --- SNIP-12 SIGNING DEBUG ---');
     console.error('[orderSigning] Domain:', JSON.stringify(domain));
-    console.error('[orderSigning] Message (Full):', JSON.stringify(message));
-
-    const msgHash = typedData.getMessageHash(myTypedData, params.publicKey);
-    console.error('[orderSigning] Resulting Hash:', msgHash);
+    console.error('[orderSigning] Message:', JSON.stringify(message));
+    console.error('[orderSigning] Signer Address:', params.publicKey);
+    console.error('[orderSigning] Order Hash:', msgHash);
     console.error('[orderSigning] --- END DEBUG ---');
 
     return BigInt(msgHash);
