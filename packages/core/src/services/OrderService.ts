@@ -99,6 +99,22 @@ export class OrderService {
     }
 
     /**
+     * Encode asset ID for order signing
+     * Extended uses "{asset}-{precision}" encoded as hex, padded to 30 chars
+     * Example: "BTC-6" -> 0x4254432d3600000000000000000000
+     */
+    encodeAssetId(asset: string, precision: number): string {
+        const assetString = `${asset}-${precision}`;
+        let hexString = '';
+        for (let i = 0; i < assetString.length; i++) {
+            hexString += assetString.charCodeAt(i).toString(16).padStart(2, '0');
+        }
+        // Pad to 30 hex chars (15 bytes)
+        hexString = hexString.padEnd(30, '0');
+        return '0x' + hexString;
+    }
+
+    /**
      * Round price to market's tick size
      */
     roundToTickSize(price: number, tickSize: string): string {
@@ -186,13 +202,23 @@ export class OrderService {
     }
 
     /**
-     * Calculate expiration timestamp in seconds
+     * Calculate expiration timestamp in seconds for API
      * Default: 28 days (safe for testnet), max 90 days
      */
     calculateExpirationSeconds(days: number = 28): number {
         // Ensure we don't exceed 90 days max
         const safeDays = Math.min(days, 90);
         return Math.ceil((Date.now() + safeDays * 24 * 60 * 60 * 1000) / 1000);
+    }
+
+    /**
+     * Calculate expiration timestamp for order signing
+     * Extended SDK adds a 14-day buffer to expiration for signing hash only
+     */
+    calculateSigningExpirationSeconds(days: number = 28): number {
+        const apiExpiration = this.calculateExpirationSeconds(days);
+        const bufferDays = 14;
+        return apiExpiration + (bufferDays * 24 * 60 * 60);
     }
 
     /**
@@ -211,7 +237,8 @@ export class OrderService {
         }
 
         const nonce = this.generateNonce();
-        const expirationSeconds = this.calculateExpirationSeconds();
+        // Use signing-specific expiration with 14-day buffer per Extended SDK
+        const expirationSeconds = this.calculateSigningExpirationSeconds();
 
         // Use the signing module
         const { signature } = createSignedOrder(
@@ -227,8 +254,8 @@ export class OrderService {
                 nonce,
                 expirationSeconds,
                 positionId: parseInt(this.collateralPosition),
-                syntheticAssetId: '0x1', // Base asset ID
-                collateralAssetId: this.config.collateralAssetId,
+                syntheticAssetId: this.encodeAssetId(market.assetName, market.assetPrecision),
+                collateralAssetId: this.config.collateralAssetId, // Uses Pedersen-hashed ID from config
                 syntheticDecimals: market.assetPrecision,
                 collateralDecimals: this.config.collateralDecimals,
             },
@@ -275,11 +302,26 @@ export class OrderService {
             price = this.roundToTickSize(parseFloat(price), market.tradingConfig.minPriceChange);
         }
 
+        // Convert USD size to base asset (BTC) quantity
+        // User enters notional value in USD, we convert to base asset qty
+        const markPrice = parseFloat(market.marketStats?.markPrice || price);
+        let qtyInBase = parseFloat(params.size) / markPrice;
+
+        // Round to market's min qty change (step size)
+        const minQtyChange = parseFloat(market.tradingConfig?.minOrderSizeChange || '0.0001');
+        qtyInBase = Math.floor(qtyInBase / minQtyChange) * minQtyChange;
+
+        // Format with appropriate precision
+        const qtyPrecision = market.assetPrecision || 8;
+        const qty = qtyInBase.toFixed(qtyPrecision);
+
+        console.log(`[OrderService] Converted $${params.size} USD to ${qty} ${market.assetName} @ $${markPrice}`);
+
         // Sign the order first (this generates nonce internally)
         const signedData = await this.signOrder(
             market,
             params.side,
-            params.size,
+            qty,
             price,
             feeRate
         );
@@ -290,7 +332,7 @@ export class OrderService {
             market: params.market,
             type: params.type === 'MARKET' ? 'LIMIT' : params.type,
             side: params.side,
-            qty: params.size,
+            qty: qty,
             price,
             timeInForce: params.type === 'MARKET' ? 'IOC' : (params.timeInForce || 'GTT'),
             expiryEpochMillis: this.calculateExpirationSeconds(params.expirationDays) * 1000,

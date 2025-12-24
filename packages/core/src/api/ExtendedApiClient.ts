@@ -160,8 +160,29 @@ export class ExtendedApiClient {
     }
 
     async getBalance(): Promise<Balance | undefined> {
-        const response = await this.request<ApiResponse<Balance>>('/user/balance');
-        return response.data;
+        try {
+            const response = await this.request<ApiResponse<Balance>>('/user/balance');
+            return response.data;
+        } catch (error: any) {
+            // Extended API returns 404 for zero balance
+            if (error.message && (error.message.includes('404') || error.message.includes('Non-JSON response'))) {
+                console.log('[ExtendedApiClient] Balance 404 detected, returning zero balance');
+                return {
+                    collateralName: 'USDC',
+                    balance: '0',
+                    equity: '0',
+                    availableForTrade: '0',
+                    availableForWithdrawal: '0',
+                    unrealisedPnl: '0',
+                    initialMargin: '0',
+                    marginRatio: '0',
+                    exposure: '0',
+                    leverage: '0',
+                    updatedTime: Date.now()
+                } as Balance;
+            }
+            throw error;
+        }
     }
 
     async getPositions(markets?: string[], side?: 'LONG' | 'SHORT'): Promise<Position[]> {

@@ -319,6 +319,12 @@ export class OnboardingService {
 
         if (credentials.apiKey) {
             extendedApi.setApiKey(credentials.apiKey);
+            console.log('[OnboardingService] Set API key:', credentials.apiKey.slice(0, 8) + '...');
+        }
+
+        if (credentials.accountId) {
+            extendedApi.setAccountId(credentials.accountId);
+            console.log('[OnboardingService] Set accountId:', credentials.accountId);
         }
 
         console.log('[OnboardingService] Onboarding complete');
@@ -376,12 +382,29 @@ export class OnboardingService {
             return null;
         }
 
+        // Restore API key and account ID to extendedApi
+        if (stored.apiKey) {
+            extendedApi.setApiKey(stored.apiKey);
+        }
+        if (stored.accountId) {
+            extendedApi.setAccountId(stored.accountId);
+        }
+
+        // Update auth store with credentials
+        useAuthStore.getState().setAuth(
+            stored.apiKey,
+            stored.starkPrivateKey,
+            stored.accountId
+        );
+        useAuthStore.getState().setOnboarded(true);
+
         // Load saved deposit address
         const savedDepositAddress = localStorage.getItem('exotrade_deposit_address');
         if (savedDepositAddress) {
             useAuthStore.getState().setDepositAddress(savedDepositAddress);
         }
 
+        console.log('[OnboardingService] Restored credentials for account:', stored.accountId);
         return stored;
     }
 }

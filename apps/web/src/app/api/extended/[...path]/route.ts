@@ -76,10 +76,6 @@ export async function GET(
     const apiKeyFromRequest = request.headers.get('X-Api-Key');
     const accountIdFromRequest = request.headers.get('X-X10-ACTIVE-ACCOUNT');
 
-    if (isUserEndpoint && !apiKeyFromRequest) {
-        console.warn('[Proxy] User endpoint called without API key:', pathString);
-    }
-
     try {
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
@@ -105,9 +101,9 @@ export async function GET(
         const contentType = response.headers.get('content-type');
         if (!contentType?.includes('application/json')) {
             const text = await response.text();
-            console.error('[Proxy] Non-JSON response:', text.substring(0, 200));
+            console.error('[Proxy] Non-JSON response:', response.status, '| Body:', text.substring(0, 500));
             return NextResponse.json(
-                { status: 'ERROR', error: { code: response.status, message: text.substring(0, 100) || 'Non-JSON response' } },
+                { status: 'ERROR', error: { code: response.status, message: text.substring(0, 200) || 'Non-JSON response' } },
                 { status: response.status }
             );
         }

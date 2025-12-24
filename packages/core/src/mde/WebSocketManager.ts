@@ -90,8 +90,8 @@ export class WebSocketManager {
     }
 
     private getPrivateStreamUrl(): string {
-        // Private streams use ws:// not wss://
-        const base = this.config.streamUrl.replace('wss://', 'ws://');
+        // Use wss:// for both public and private streams in browser
+        const base = this.config.streamUrl;
         return `${base}/account`;
     }
 

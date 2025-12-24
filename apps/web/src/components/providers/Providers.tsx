@@ -25,10 +25,9 @@ export function Providers({ children }: { children: ReactNode }) {
                     accentColor: '#22c55e', // Green accent
                     logo: '/logo.svg',
                 },
-                loginMethods: ['email', 'google', 'twitter'],
+                loginMethods: ['wallet', 'email', 'google', 'twitter'],
                 embeddedWallets: {
                     createOnLogin: 'users-without-wallets',
-                    noPromptOnSignature: true,
                 },
                 // Starknet configuration
                 defaultChain: {

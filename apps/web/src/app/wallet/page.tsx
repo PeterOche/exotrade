@@ -8,44 +8,48 @@ import { usePrivy } from '@privy-io/react-auth';
 export default function WalletPage() {
     const router = useRouter();
     const { ready, authenticated, user } = usePrivy();
-    const { isOnboarded, depositAddress } = useAuthStore();
+    const { isOnboarded, depositAddress, apiKey, accountId } = useAuthStore();
     const { balance } = useAccountStore();
     const [copied, setCopied] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
+    const [balanceError, setBalanceError] = useState<string | null>(null);
 
-    // Fetch balance on mount
+    // Fetch balance when credentials are available
     useEffect(() => {
         const fetchBalance = async () => {
-            try {
-                // Ensure API key and account ID are loaded from localStorage
-                const storedCreds = localStorage.getItem('exotrade_credentials');
-                if (storedCreds) {
-                    const creds = JSON.parse(storedCreds);
-                    if (creds.apiKey) {
-                        extendedApi.setApiKey(creds.apiKey);
-                    }
-                    if (creds.accountId) {
-                        extendedApi.setAccountId(creds.accountId);
-                    }
-                }
+            // Need both apiKey and accountId to fetch balance
+            if (!apiKey || !accountId) {
+                console.log('[WalletPage] Missing credentials, apiKey:', !!apiKey, 'accountId:', !!accountId);
+                setIsLoading(false);
+                return;
+            }
 
+            try {
+                // Set credentials on API client
+                extendedApi.setApiKey(apiKey);
+                extendedApi.setAccountId(accountId);
+
+                console.log('[WalletPage] Fetching balance for account:', accountId);
                 const balanceData = await extendedApi.getBalance();
                 if (balanceData) {
                     useAccountStore.getState().setBalance(balanceData);
+                    setBalanceError(null);
                 }
             } catch (error) {
                 console.error('Failed to fetch balance:', error);
+                setBalanceError(error instanceof Error ? error.message : 'Failed to load balance');
             } finally {
                 setIsLoading(false);
             }
         };
 
-        if (isOnboarded) {
+        if (isOnboarded && apiKey && accountId) {
+            setIsLoading(true);
             fetchBalance();
-        } else {
+        } else if (!isOnboarded) {
             setIsLoading(false);
         }
-    }, [isOnboarded]);
+    }, [isOnboarded, apiKey, accountId]);
 
     // Redirect if not connected
     useEffect(() => {
