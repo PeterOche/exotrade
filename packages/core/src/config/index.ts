@@ -37,8 +37,8 @@ export const TESTNET_CONFIG: ExtendedConfig = {
     signingDomain: 'starknet.sepolia.extended.exchange',
     collateralDecimals: 6,
     starknetDomain: {
-        name: 'Extended',
-        version: '1',
+        name: 'Perpetuals',
+        version: 'v0',
         chainId: 'SN_SEPOLIA',
         revision: '1',
     },
