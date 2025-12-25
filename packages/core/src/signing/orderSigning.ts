@@ -47,6 +47,8 @@ function toFieldElement(value: bigint): bigint {
  * Calculate order message hash following Extended's SNIP-12 pattern
  */
 export function calculateOrderHash(params: OrderHashParams): bigint {
+
+
     const types = {
         StarknetDomain: [
             { name: 'name', type: 'shortstring' },
@@ -79,15 +81,15 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
         ]
     };
 
-    // Use raw numeric values (positive field elements) to match debugInfo
+    // Use Numbers for signed amounts to match debugInfo integers and avoid JSON schema errors
     const message = {
         positionId: { value: { value: num.toHex(params.positionId) } },
         baseAssetId: { value: num.toHex(params.baseAssetId) },
-        baseAmount: { _value: toFieldElement(params.baseAmount).toString() }, // use stringified bigint
+        baseAmount: { _value: Number(params.baseAmount) },
         quoteAssetId: { value: num.toHex(params.quoteAssetId) },
-        quoteAmount: { _value: toFieldElement(params.quoteAmount).toString() }, // use stringified bigint
+        quoteAmount: { _value: Number(params.quoteAmount) },
         feeAssetId: { value: num.toHex(params.feeAssetId) },
-        feeAmount: toFieldElement(params.feeAmount).toString(),
+        feeAmount: num.toHex(params.feeAmount),
         expiration: { seconds: num.toHex(params.expiration) },
         salt: num.toHex(params.nonce)
     };
@@ -95,8 +97,8 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
     const domain = {
         name: params.domain.name,
         version: params.domain.version,
-        chainId: params.domain.chainId, // 'SN_SEPOLIA'
-        revision: params.domain.revision
+        chainId: params.domain.chainId,
+        revision: Number(params.domain.revision)
     };
 
     const myTypedData = {
@@ -107,13 +109,17 @@ export function calculateOrderHash(params: OrderHashParams): bigint {
     };
 
     // Calculate the hash using SNIP-12
-    const msgHash = typedData.getMessageHash(myTypedData, params.publicKey);
+    // Attempting address 0x0 which is standard for off-chain order matching systems
+    const msgHash = typedData.getMessageHash(myTypedData, '0x0');
+
+    // Fallback: log hash with public key too for comparison
+    const msgHashWithKey = typedData.getMessageHash(myTypedData, params.publicKey);
 
     console.error('[orderSigning] --- SNIP-12 SIGNING DEBUG ---');
     console.error('[orderSigning] Domain:', JSON.stringify(domain));
-    console.error('[orderSigning] Message:', JSON.stringify(message));
-    console.error('[orderSigning] Signer Address:', params.publicKey);
-    console.error('[orderSigning] Order Hash:', msgHash);
+    console.error('[orderSigning] Message:', JSON.stringify(message, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+    console.error('[orderSigning] Order Hash (Address=0):', msgHash);
+    console.error('[orderSigning] Order Hash (Address=Key):', msgHashWithKey);
     console.error('[orderSigning] --- END DEBUG ---');
 
     return BigInt(msgHash);

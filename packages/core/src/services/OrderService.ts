@@ -383,13 +383,19 @@ export class OrderService {
         useOrderStore.getState().setPending(externalId, true);
 
         try {
-            // Get API key from auth store
-            const apiKey = useAuthStore.getState().apiKey;
+            // Get API key and account ID from auth store
+            const authStore = useAuthStore.getState();
+            const apiKey = authStore.apiKey;
+            const accountId = authStore.accountId;
+
             const headers: Record<string, string> = {
                 'Content-Type': 'application/json',
             };
             if (apiKey) {
                 headers['X-Api-Key'] = apiKey;
+            }
+            if (accountId) {
+                headers['X-X10-ACTIVE-ACCOUNT'] = String(accountId);
             }
 
             // Submit via serverless proxy (which adds builder code)

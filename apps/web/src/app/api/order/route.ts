@@ -18,8 +18,9 @@ export async function POST(request: Request) {
     try {
         const orderPayload = await request.json();
 
-        // Extract API key from the request
+        // Extract headers from the request
         const apiKey = request.headers.get('X-Api-Key');
+        const activeAccount = request.headers.get('X-X10-ACTIVE-ACCOUNT');
 
         // For now, skip builder injection if no valid builder ID
         // Builder integration requires registration with Extended
@@ -38,9 +39,12 @@ export async function POST(request: Request) {
             'User-Agent': 'ExoTrade/1.0',
         };
 
-        // Add API key if available
+        // Add API key and account ID if available
         if (apiKey) {
             headers['X-Api-Key'] = apiKey;
+        }
+        if (activeAccount) {
+            headers['X-X10-ACTIVE-ACCOUNT'] = activeAccount;
         }
 
         console.log('[Order Proxy] Submitting order to Extended API');
